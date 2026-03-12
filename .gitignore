@@ -1,0 +1,11 @@
+# TeleTrader - .gitignore
+.env
+*.session
+*.session-journal
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+*.egg-info/

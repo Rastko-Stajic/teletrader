@@ -1,0 +1,22 @@
+# TeleTrader - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Telegram client (user-account based, works in private groups)
+telethon>=1.34.0
+
+# MT5 trading API (Windows only)
+MetaTrader5>=5.0.45
+
+# Web dashboard
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# Config
+python-dotenv>=1.0.0
+
+# Optional: async support
+asyncio-throttle>=1.0.2
+
+# Browser automation for calculator fallback
+# After install: playwright install chromium
+playwright>=1.44.0
