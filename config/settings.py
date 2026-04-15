@@ -22,13 +22,20 @@ class Settings:
     mt5_login: int = field(default_factory=lambda: int(os.getenv("MT5_LOGIN", "0")))
     mt5_password: str = field(default_factory=lambda: os.getenv("MT5_PASSWORD", ""))
     mt5_server: str = field(default_factory=lambda: os.getenv("MT5_SERVER", ""))
+    mt5_symbol_suffix: str = field(default_factory=lambda: os.getenv("MT5_SYMBOL_SUFFIX", ".bp"))
 
     # --- Risk Management ---
-    max_lot_size: float = field(default_factory=lambda: float(os.getenv("MAX_LOT_SIZE", "0.1")))
+    max_lot_size: float = field(default_factory=lambda: float(os.getenv("MAX_LOT_SIZE", "1.5")))
     default_lot_size: float = field(default_factory=lambda: float(os.getenv("DEFAULT_LOT_SIZE", "0.01")))
     max_open_trades: int = field(default_factory=lambda: int(os.getenv("MAX_OPEN_TRADES", "5")))
     max_daily_loss_usd: float = field(default_factory=lambda: float(os.getenv("MAX_DAILY_LOSS_USD", "100")))
-    kill_switch: bool = False  # toggled at runtime via dashboard
+    kill_switch: bool = False            # toggled at runtime via dashboard
+    gold_enabled: bool = False           # Gold (XAUUSD) trading — disabled by default
+    force_market_execution: bool = field(default_factory=lambda: os.getenv("FORCE_MARKET_EXECUTION", "true").lower() == "true")
+
+    # --- Dashboard ---
+    dashboard_host: str = field(default_factory=lambda: os.getenv("DASHBOARD_HOST", "127.0.0.1"))
+    dashboard_port: int = field(default_factory=lambda: int(os.getenv("DASHBOARD_PORT", "8080")))
 
     # --- Symbols whitelist (empty = allow all) ---
     allowed_symbols: List[str] = field(
