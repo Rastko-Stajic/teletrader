@@ -1,6 +1,6 @@
 """
 RiskManager - gates every signal before it reaches the executor.
-Checks: kill switch, symbol whitelist, lot size, max open trades, daily loss limit.
+Checks: kill switch, gold toggle, symbol whitelist, lot size, max open trades, daily loss limit.
 """
 
 from typing import Tuple
@@ -10,6 +10,8 @@ from core.logger import get_logger
 from config.settings import Settings
 
 logger = get_logger("risk")
+
+GOLD_SYMBOL = "XAUUSD"
 
 
 class RiskManager:
@@ -27,6 +29,10 @@ class RiskManager:
         if self.settings.kill_switch:
             return False, "Kill switch is ACTIVE — all trading halted"
 
+        # ── Gold toggle ───────────────────────────────────────────────────────
+        if signal.symbol == GOLD_SYMBOL and not self.settings.gold_enabled:
+            return False, "Gold (XAUUSD) trading is currently disabled"
+
         # ── Symbol whitelist ──────────────────────────────────────────────────
         if self.settings.allowed_symbols:
             if signal.symbol not in self.settings.allowed_symbols:
@@ -36,9 +42,6 @@ class RiskManager:
         lot = signal.lot_size or self.settings.default_lot_size
         if lot > self.settings.max_lot_size:
             return False, f"Lot size {lot} exceeds max {self.settings.max_lot_size}"
-
-        # Clamp lot instead of blocking (optional — uncomment to use)
-        # signal.lot_size = min(lot, self.settings.max_lot_size)
 
         # ── Daily loss limit ──────────────────────────────────────────────────
         self._reset_daily_if_needed()
@@ -79,3 +82,9 @@ class RiskManager:
         state = "ACTIVE" if self.settings.kill_switch else "INACTIVE"
         logger.warning(f"Kill switch toggled: {state}")
         return self.settings.kill_switch
+
+    def toggle_gold(self) -> bool:
+        self.settings.gold_enabled = not self.settings.gold_enabled
+        state = "ENABLED" if self.settings.gold_enabled else "DISABLED"
+        logger.info(f"Gold trading toggled: {state}")
+        return self.settings.gold_enabled

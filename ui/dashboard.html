@@ -174,6 +174,44 @@
     50% { box-shadow: 0 0 40px rgba(255,71,87,0.9); }
   }
 
+  /* ── Gold Toggle ── */
+  .gold-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 18px;
+    border: 1px solid var(--text-dim);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    user-select: none;
+  }
+
+  .gold-toggle input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--yellow);
+    cursor: pointer;
+  }
+
+  .gold-toggle-text {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+
+  .gold-toggle.active {
+    border-color: var(--yellow);
+    box-shadow: 0 0 12px rgba(255,215,0,0.3);
+  }
+
+  .gold-toggle.active .gold-toggle-text {
+    color: var(--yellow);
+  }
+
   /* ── Layout ── */
   main {
     padding: 24px 28px;
@@ -482,6 +520,10 @@
       <span id="statusText">CONNECTING</span>
     </div>
     <div class="timestamp" id="clock"></div>
+    <label class="gold-toggle" id="goldToggleLabel">
+      <input type="checkbox" id="goldCheckbox" onchange="toggleGold()" />
+      <span class="gold-toggle-text">🥇 GOLD</span>
+    </label>
     <button class="kill-btn" id="killBtn" onclick="toggleKillSwitch()">
       ⛔ KILL SWITCH
     </button>
@@ -582,6 +624,7 @@
       <div style="color:var(--text-dim)">Loading logs...</div>
     </div>
   </div>
+
   <!-- Unrecognized Messages -->
   <div class="card unrecognized-card">
     <div class="card-header">
@@ -598,7 +641,7 @@
 </main>
 
 <script>
-const API = 'http://127.0.0.1:8000/api';
+const API = window.location.origin + '/api';
 let killActive = false;
 
 // ── Clock ────────────────────────────────────────────────────────────────────
@@ -653,6 +696,13 @@ async function updateStatus() {
     killActive = data.kill_switch;
     killBtn.className = killActive ? 'kill-btn active' : 'kill-btn';
     killBtn.innerHTML = killActive ? '⛔ KILL ACTIVE' : '⛔ KILL SWITCH';
+
+    // Sync gold toggle
+    const goldEnabled = data.gold_enabled || false;
+    const goldCheckbox = document.getElementById('goldCheckbox');
+    const goldLabel    = document.getElementById('goldToggleLabel');
+    if (goldCheckbox) goldCheckbox.checked = goldEnabled;
+    if (goldLabel)    goldLabel.className  = goldEnabled ? 'gold-toggle active' : 'gold-toggle';
   } else {
     dot.className = 'status-dot dead';
     text.textContent = 'OFFLINE';
@@ -798,7 +848,19 @@ async function toggleKillSwitch() {
   } catch { alert('Could not reach server.'); }
 }
 
-// ── Unrecognized messages ────────────────────────────────────────────────────
+// ── Gold toggle ───────────────────────────────────────────────────────────────
+async function toggleGold() {
+  try {
+    const r = await fetch(API + '/gold/toggle', { method: 'POST' });
+    const data = await r.json();
+    const label    = document.getElementById('goldToggleLabel');
+    const checkbox = document.getElementById('goldCheckbox');
+    checkbox.checked = data.gold_enabled;
+    label.className  = data.gold_enabled ? 'gold-toggle active' : 'gold-toggle';
+  } catch { alert('Could not reach server.'); }
+}
+
+// ── Unrecognized messages ─────────────────────────────────────────────────────
 async function updateUnrecognized() {
   const data = await fetchJSON('/unrecognized');
   const list  = document.getElementById('unrecList');
