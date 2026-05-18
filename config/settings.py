@@ -30,7 +30,7 @@ class Settings:
     max_open_trades: int = field(default_factory=lambda: int(os.getenv("MAX_OPEN_TRADES", "5")))
     max_daily_loss_usd: float = field(default_factory=lambda: float(os.getenv("MAX_DAILY_LOSS_USD", "100")))
     kill_switch: bool = False            # toggled at runtime via dashboard
-    gold_enabled: bool = False           # Gold (XAUUSD) trading — disabled by default
+    gold_enabled: bool = True           # Gold (XAUUSD) trading — disabled by default
     force_market_execution: bool = field(default_factory=lambda: os.getenv("FORCE_MARKET_EXECUTION", "true").lower() == "true")
 
     # --- Dashboard ---

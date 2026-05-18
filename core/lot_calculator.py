@@ -78,7 +78,7 @@ def price_to_pips(symbol: str, price_distance: float) -> float:
 
 # ── Live pip value from MT5 ───────────────────────────────────────────────────
 
-def get_pip_value_from_mt5(symbol: str) -> Optional[float]:
+def get_pip_value_from_mt5(symbol: str, suffix: str = "") -> Optional[float]:
     """
     Fetch the exact pip value (in account currency, e.g. USD) per 1 standard lot
     directly from MT5 using live tick value data.
@@ -152,7 +152,12 @@ def get_pip_value_fallback(symbol: str) -> float:
         rate  = approx_rates.get(quote, 1.0)
         return (ps * units) / rate
 
-    # Cross pairs — rough approximation
+    # Cross pairs where quote is JPY (GBPJPY, EURJPY, CADJPY etc.)
+    # pip value in JPY = pip_size * lot_units; convert to USD
+    if clean.endswith("JPY"):
+        return (ps * units) / 150.0  # approximate JPY/USD rate
+
+    # Other cross pairs (EURGBP, AUDCAD, etc.) — rough approximation
     return ps * units
 
 
@@ -184,7 +189,12 @@ def calculate_lot_size(
         return 0.0
 
     # Get pip value — live MT5 first, fallback second
-    pip_val = get_pip_value_from_mt5(symbol)
+    from config.settings import Settings
+    try:
+        suffix = Settings().mt5_symbol_suffix
+    except Exception:
+        suffix = ""
+    pip_val = get_pip_value_from_mt5(symbol, suffix)
     source  = "MT5 live"
 
     if pip_val is None:
