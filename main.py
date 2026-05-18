@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import uvicorn
 from core.telegram_listener import TelegramListener
 from core.signal_parser import SignalParser
-from core.signal import Signal, CloseSignal, CloseType
+from core.signal import Signal, CloseSignal, CloseType, OrderType
 from core.mt5_executor import MT5Executor
 from core.risk_manager import RiskManager
 from core.lot_calculator import get_lot_size
@@ -94,8 +94,8 @@ async def handle_open(
         "timestamp":    datetime.now(timezone.utc).isoformat(),
     })
 
-    # Step 1 — Calculate lot size
-    if signal.entry_price and signal.stop_loss and signal.risk_percent:
+    # Step 1 — Calculate lot size using live bid/ask price
+    if signal.stop_loss and signal.risk_percent:
         account  = executor.get_account_info()
         balance  = account.get("balance", 0)
         currency = account.get("currency", "USD")
@@ -104,10 +104,21 @@ async def handle_open(
             logger.error("Cannot size position: MT5 balance unavailable")
             return
 
+        # Get live price from MT5
+        live_price = executor.get_live_price(signal.symbol, signal.direction.value)
+        if live_price is None:
+            logger.error(f"Cannot get live price for {signal.symbol} — aborting")
+            return
+
+        logger.info(
+            f"Live price for {signal.symbol} ({signal.direction.value}): {live_price} "
+            f"(signal entry was: {signal.entry_price or 'not specified'})"
+        )
+
         lot = await get_lot_size(
             balance=balance,
             risk_percent=signal.risk_percent,
-            entry_price=signal.entry_price,
+            entry_price=live_price,        # ← live price, not signal entry
             stop_loss_price=signal.stop_loss,
             symbol=signal.symbol,
             account_currency=currency,
@@ -115,12 +126,13 @@ async def handle_open(
         if lot <= 0:
             logger.error(f"Lot size {lot} invalid — aborting")
             return
-        signal.lot_size = lot
+        signal.lot_size  = lot
+        signal.entry_price = live_price    # update signal to reflect actual execution price
+        signal.order_type  = OrderType.MARKET
     else:
         missing = [f for f, v in [
-            ("risk %",      signal.risk_percent),
-            ("entry price", signal.entry_price),
-            ("stop loss",   signal.stop_loss),
+            ("risk %",    signal.risk_percent),
+            ("stop loss", signal.stop_loss),
         ] if not v]
         logger.warning(f"Missing {', '.join(missing)} — using default lot: {settings.default_lot_size}")
         signal.lot_size = settings.default_lot_size

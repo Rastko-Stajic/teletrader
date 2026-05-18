@@ -4,7 +4,7 @@ Requires: pip install MetaTrader5
 Only works on Windows with MT5 terminal installed and running.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from core.signal import Signal, Direction, OrderType
 from core.logger import get_logger
 from config.settings import Settings
@@ -404,6 +404,26 @@ class MT5Executor:
         if symbol.upper().endswith(suffix.upper()):
             return symbol
         return symbol + suffix
+
+    def get_live_price(self, symbol: str, direction: str) -> Optional[float]:
+        """
+        Returns live ask price for BUY, bid price for SELL.
+        Uses the MT5 symbol with broker suffix applied.
+        Returns None if price unavailable.
+        """
+        if not MT5_AVAILABLE:
+            logger.warning(f"[SIMULATION] Cannot get live price for {symbol}")
+            return None
+
+        mt5_symbol = self._to_mt5_symbol(symbol)
+        tick = mt5.symbol_info_tick(mt5_symbol)
+        if tick is None:
+            logger.error(f"Cannot get tick data for {mt5_symbol}")
+            return None
+
+        price = tick.ask if direction.upper() == "BUY" else tick.bid
+        logger.debug(f"Live price {mt5_symbol}: ask={tick.ask} bid={tick.bid} → using {price}")
+        return price
 
     def _get_position_by_ticket(self, ticket: int):
         """Return MT5 position object for a ticket, or None if not found."""
