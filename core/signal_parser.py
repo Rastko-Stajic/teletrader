@@ -54,6 +54,7 @@ SYMBOL_ALIASES = {
 NOT_SYMBOLS = {
     "BUY", "SELL", "NOW", "LONG", "SHORT", "STOP", "ENTRY",
     "OPEN", "CLOSE", "RISK", "TAKE", "PROFIT", "LOSS",
+    "MOVE", "SL", "TP",
 }
 
 # ── Regex building blocks ─────────────────────────────────────────────────────
@@ -307,3 +308,68 @@ class CloseSignalParser:
             )
 
         return None
+
+
+# ── Move SL patterns ──────────────────────────────────────────────────────────
+# Matches: "Move SL to 2310", "move sl 2310", "Move stop loss to 1.0850",
+#          "SL to 2310"
+MOVE_SL_RE = re.compile(
+    r"\b(?:move\s+)?s(?:top\s*)?l(?:oss)?\s+to\s+(\d+(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+
+
+class MoveSLParser:
+
+    def is_move_sl_message(self, text: str) -> bool:
+        return bool(MOVE_SL_RE.search(text))
+
+    def parse(
+        self,
+        text: str,
+        message_id: Optional[int] = None,
+        reply_to_message_id: Optional[int] = None,
+    ):
+        from core.signal import MoveSLSignal
+        try:
+            return self._parse(text, message_id, reply_to_message_id)
+        except Exception as e:
+            logger.warning(f"MoveSLParser error: {e}")
+            return None
+
+    def _parse(self, text, message_id, reply_to_message_id):
+        from core.signal import MoveSLSignal
+
+        m = MOVE_SL_RE.search(text)
+        if not m:
+            return None
+
+        new_sl = _clean(m.group(1))
+
+        # Only extract symbol/direction from the message text if it's
+        # explicitly present (e.g. "Move SL GBPUSD Buy to 1.34").
+        # For the common case ("Move SL to 1.34" as a reply), we leave
+        # these None and let handle_move_sl resolve them from the tracker.
+        sp = SignalParser()
+
+        # Strip the "Move SL to <price>" part before symbol/direction extraction
+        # to avoid false matches on words like "MOVE"
+        stripped = MOVE_SL_RE.sub("", text).strip()
+
+        symbol    = sp._extract_symbol(stripped) if stripped else None
+        direction_raw = sp._extract_direction(stripped) if stripped else None
+        direction_str = direction_raw.value if direction_raw else None
+
+        logger.info(
+            f"Move SL signal: new_sl={new_sl} symbol={symbol} "
+            f"direction={direction_str} reply_to={reply_to_message_id}"
+        )
+
+        return MoveSLSignal(
+            new_sl=new_sl,
+            symbol=symbol,
+            direction=direction_str,
+            reply_to_message_id=reply_to_message_id,
+            raw_message=text,
+            source_message_id=message_id,
+        )

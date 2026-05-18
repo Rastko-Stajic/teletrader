@@ -89,3 +89,25 @@ class CloseSignal:
         price = f" @ {self.close_price}" if self.close_price else ""
         pips  = f" ({self.realized_pips:+.1f} pips)" if self.realized_pips is not None else ""
         return f"{self.close_type.value}{sym}{price}{pips}"
+
+
+@dataclass
+class MoveSLSignal:
+    new_sl: float
+
+    # Symbol + direction — resolved from reply tracker or parsed from message
+    symbol:    Optional[str] = None
+    direction: Optional[str] = None   # "BUY" or "SELL"
+
+    # Reply link — used to look up symbol+direction from position tracker
+    reply_to_message_id: Optional[int] = None
+
+    # Metadata
+    raw_message:       str = ""
+    timestamp:         datetime = field(default_factory=datetime.utcnow)
+    source_message_id: Optional[int] = None
+
+    def __str__(self):
+        sym = f" {self.symbol}" if self.symbol else ""
+        d   = f" {self.direction}" if self.direction else ""
+        return f"MOVE SL{sym}{d} → {self.new_sl}"

@@ -425,6 +425,72 @@ class MT5Executor:
         logger.debug(f"Live price {mt5_symbol}: ask={tick.ask} bid={tick.bid} → using {price}")
         return price
 
+    def modify_sl_by_symbol_and_direction(
+        self, symbol: str, direction: str, new_sl: float
+    ) -> dict:
+        """
+        Modify the stop loss on all open positions matching symbol + direction.
+        direction: "BUY" or "SELL"
+        Returns {"success": True, "modified": [tickets], "failed": [...]}
+        """
+        if not MT5_AVAILABLE:
+            logger.info(
+                f"[SIMULATION] Would move SL for {direction} {symbol} → {new_sl}"
+            )
+            return {"success": True, "simulated": True, "modified": [], "failed": []}
+
+        mt5_symbol = self._to_mt5_symbol(symbol)
+        pos_type   = 0 if direction.upper() == "BUY" else 1
+        positions  = mt5.positions_get(symbol=mt5_symbol)
+
+        if not positions:
+            return {
+                "success": False,
+                "error":   f"No open positions found for {mt5_symbol}",
+                "modified": [],
+                "failed":   [],
+            }
+
+        matching = [p for p in positions if p.type == pos_type]
+        if not matching:
+            return {
+                "success": False,
+                "error":   f"No {direction} positions found for {mt5_symbol}",
+                "modified": [],
+                "failed":   [],
+            }
+
+        modified, failed = [], []
+        for pos in matching:
+            request = {
+                "action":   mt5.TRADE_ACTION_SLTP,
+                "position": pos.ticket,
+                "sl":       new_sl,
+                "tp":       pos.tp,
+            }
+            result = mt5.order_send(request)
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                modified.append(pos.ticket)
+                logger.info(
+                    f"SL moved: ticket={pos.ticket} {direction} {mt5_symbol} "
+                    f"SL {pos.sl} → {new_sl}"
+                )
+            else:
+                failed.append({
+                    "ticket": pos.ticket,
+                    "error":  f"retcode={result.retcode} {result.comment}",
+                })
+                logger.error(
+                    f"SL modify failed: ticket={pos.ticket} "
+                    f"retcode={result.retcode} {result.comment}"
+                )
+
+        return {
+            "success":  len(failed) == 0,
+            "modified": modified,
+            "failed":   failed,
+        }
+
     def _get_position_by_ticket(self, ticket: int):
         """Return MT5 position object for a ticket, or None if not found."""
         positions = mt5.positions_get(ticket=ticket)

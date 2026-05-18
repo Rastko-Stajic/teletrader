@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import uvicorn
 from core.telegram_listener import TelegramListener
 from core.signal_parser import SignalParser
-from core.signal import Signal, CloseSignal, CloseType, OrderType
+from core.signal import Signal, CloseSignal, CloseType, MoveSLSignal, OrderType
 from core.mt5_executor import MT5Executor
 from core.risk_manager import RiskManager
 from core.lot_calculator import get_lot_size
@@ -55,6 +55,9 @@ async def run_bot():
     async def on_close(close_signal: CloseSignal):
         await handle_close(close_signal, executor, tracker)
 
+    async def on_move_sl(move_signal: MoveSLSignal):
+        await handle_move_sl(move_signal, executor, tracker)
+
     def on_unrecognized(text: str, message_id: int):
         log_unrecognized(text, message_id)
 
@@ -62,6 +65,7 @@ async def run_bot():
         settings=settings,
         on_signal=on_signal,
         on_close=on_close,
+        on_move_sl=on_move_sl,
         on_unrecognized=on_unrecognized,
         parser=parser,
     )
@@ -280,6 +284,69 @@ async def handle_close(
         else:
             logger.error(f"Cancel FAILED: ticket={ticket} error={result.get('error')}")
             push_error(f"Failed to cancel order {ticket}: {result.get('error')}")
+
+
+# ── Move SL pipeline ──────────────────────────────────────────────────────────
+
+async def handle_move_sl(
+    move_signal: MoveSLSignal,
+    executor: MT5Executor,
+    tracker: PositionTracker,
+):
+    from ui.dashboard import push_error
+    logger.info(f"Move SL signal: {move_signal}")
+
+    symbol    = move_signal.symbol
+    direction = move_signal.direction
+
+    # Try to resolve symbol+direction from reply reference
+    if move_signal.reply_to_message_id:
+        record = tracker.get_record(move_signal.reply_to_message_id)
+        if record:
+            symbol    = symbol    or record.get("symbol")
+            direction = direction or record.get("direction")
+
+    if not symbol:
+        msg = (
+            "Move SL signal received but could not determine the symbol. "
+            "Include the symbol in the message or send as a reply to the "
+            "original open signal."
+        )
+        logger.error(msg)
+        push_error(msg)
+        return
+
+    if not direction:
+        msg = (
+            f"Move SL signal for {symbol} received but could not determine "
+            "direction (BUY/SELL). Include it in the message or send as a "
+            "reply to the original open signal."
+        )
+        logger.error(msg)
+        push_error(msg)
+        return
+
+    result = executor.modify_sl_by_symbol_and_direction(
+        symbol=symbol,
+        direction=direction,
+        new_sl=move_signal.new_sl,
+    )
+
+    if result.get("modified"):
+        logger.info(
+            f"SL moved to {move_signal.new_sl} for {direction} {symbol}: "
+            f"tickets={result['modified']}"
+        )
+    if result.get("failed"):
+        logger.error(f"SL modify failed for some positions: {result['failed']}")
+        push_error(
+            f"Failed to move SL for some {direction} {symbol} positions: "
+            f"{result['failed']}"
+        )
+    if not result.get("modified") and not result.get("simulated"):
+        msg = result.get("error", f"No matching {direction} {symbol} positions found")
+        logger.error(msg)
+        push_error(msg)
 
 
 # ── Dashboard gold toggle endpoint (wired to runtime risk manager) ────────────

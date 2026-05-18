@@ -8,10 +8,11 @@ Handles two message types:
 """
 
 import asyncio
+import inspect
 from typing import Callable, Optional
 from telethon import TelegramClient, events
 from telethon.tl.types import Message
-from core.signal_parser import SignalParser, CloseSignalParser
+from core.signal_parser import SignalParser, CloseSignalParser, MoveSLParser
 from core.signal import Signal
 from core.logger import get_logger
 from config.settings import Settings
@@ -25,15 +26,18 @@ class TelegramListener:
         settings: Settings,
         on_signal:       Callable,   # async (Signal) -> None
         on_close:        Callable,   # async (CloseSignal) -> None
+        on_move_sl:      Callable,   # async (MoveSLSignal) -> None
         on_unrecognized: Callable,   # (text, message_id) -> None
         parser: SignalParser,
     ):
-        self.settings       = settings
-        self.on_signal      = on_signal
-        self.on_close       = on_close
+        self.settings        = settings
+        self.on_signal       = on_signal
+        self.on_close        = on_close
+        self.on_move_sl      = on_move_sl
         self.on_unrecognized = on_unrecognized
-        self.parser         = parser
-        self.close_parser   = CloseSignalParser()
+        self.parser          = parser
+        self.close_parser    = CloseSignalParser()
+        self.move_sl_parser  = MoveSLParser()
 
         self.client = TelegramClient(
             "teletrader_session",
@@ -69,6 +73,20 @@ class TelegramListener:
 
             loop = asyncio.get_event_loop()
 
+            # ── Route: Move SL check first ───────────────────────────────────
+            if self.move_sl_parser.is_move_sl_message(text):
+                move_signal = await loop.run_in_executor(
+                    None,
+                    self.move_sl_parser.parse,
+                    text, message.id, reply_to_id,
+                )
+                if move_signal:
+                    if inspect.iscoroutinefunction(self.on_move_sl):
+                        await self.on_move_sl(move_signal)
+                    else:
+                        await loop.run_in_executor(None, self.on_move_sl, move_signal)
+                    return
+
             # ── Route: close/cancel check first (cheap regex) ─────────────────
             if self.close_parser.is_close_message(text):
                 close_signal = await loop.run_in_executor(
@@ -77,7 +95,7 @@ class TelegramListener:
                     text, message.id, reply_to_id,
                 )
                 if close_signal:
-                    if asyncio.iscoroutinefunction(self.on_close):
+                    if inspect.iscoroutinefunction(self.on_close):
                         await self.on_close(close_signal)
                     else:
                         await loop.run_in_executor(None, self.on_close, close_signal)
@@ -88,7 +106,7 @@ class TelegramListener:
                 None, self.parser.parse, text, message.id
             )
             if signal:
-                if asyncio.iscoroutinefunction(self.on_signal):
+                if inspect.iscoroutinefunction(self.on_signal):
                     await self.on_signal(signal)
                 else:
                     await loop.run_in_executor(None, self.on_signal, signal)
