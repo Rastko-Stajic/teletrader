@@ -95,6 +95,11 @@ class TelegramListener:
                     text, message.id, reply_to_id,
                 )
                 if close_signal:
+                    # Attach Telegram context so handle_close can fetch
+                    # previous messages if needed for symbol resolution
+                    close_signal._tg_client    = self.client
+                    close_signal._tg_group_id  = self.settings.telegram_group_id
+                    close_signal._tg_message_id = message.id
                     if inspect.iscoroutinefunction(self.on_close):
                         await self.on_close(close_signal)
                     else:
