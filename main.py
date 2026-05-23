@@ -10,6 +10,7 @@ from core.telegram_listener import TelegramListener
 from core.signal_parser import SignalParser
 from core.signal import Signal, CloseSignal, CloseType, MoveSLSignal, OrderType
 from core.mt5_executor import MT5Executor
+from core.multi_account_executor import MultiAccountExecutor, build_executors
 from core.risk_manager import RiskManager
 from core.lot_calculator import get_lot_size
 from core.position_tracker import PositionTracker
@@ -39,15 +40,21 @@ async def run_bot():
     parser   = SignalParser()
     risk     = RiskManager(settings)
     _risk    = risk
-    executor = MT5Executor(settings)
-    tracker  = PositionTracker()
+    executors = build_executors(settings)
+    executor  = MultiAccountExecutor(executors)
+    tracker   = PositionTracker()
 
     # Sync initial gold state to dashboard
     dashboard_state["gold_enabled"] = settings.gold_enabled
 
-    if not executor.connect():
-        logger.error("Failed to connect to MT5. Make sure MetaTrader5 is running.")
+    if not executor.connect_all():
+        logger.error("Failed to connect to any MT5 account. Make sure MetaTrader5 is running.")
         return
+
+    logger.info(
+        f"Connected to {len(executor._active())} MT5 account(s): "
+        f"{[ex.label for ex in executor._active()]}"
+    )
 
     async def on_signal(signal: Signal):
         await handle_open(signal, risk, executor, tracker, settings)
@@ -79,7 +86,7 @@ async def run_bot():
 async def handle_open(
     signal: Signal,
     risk: RiskManager,
-    executor: MT5Executor,
+    executor: MultiAccountExecutor,
     tracker: PositionTracker,
     settings: Settings,
 ):
@@ -98,42 +105,9 @@ async def handle_open(
         "timestamp":    datetime.now(timezone.utc).isoformat(),
     })
 
-    # Step 1 — Calculate lot size using live bid/ask price
-    if signal.stop_loss and signal.risk_percent:
-        account  = executor.get_account_info()
-        balance  = account.get("balance", 0)
-        currency = account.get("currency", "USD")
-
-        if balance <= 0:
-            logger.error("Cannot size position: MT5 balance unavailable")
-            return
-
-        # Get live price from MT5
-        live_price = executor.get_live_price(signal.symbol, signal.direction.value)
-        if live_price is None:
-            logger.error(f"Cannot get live price for {signal.symbol} — aborting")
-            return
-
-        logger.info(
-            f"Live price for {signal.symbol} ({signal.direction.value}): {live_price} "
-            f"(signal entry was: {signal.entry_price or 'not specified'})"
-        )
-
-        lot = await get_lot_size(
-            balance=balance,
-            risk_percent=signal.risk_percent,
-            entry_price=live_price,        # ← live price, not signal entry
-            stop_loss_price=signal.stop_loss,
-            symbol=signal.symbol,
-            account_currency=currency,
-        )
-        if lot <= 0:
-            logger.error(f"Lot size {lot} invalid — aborting")
-            return
-        signal.lot_size  = lot
-        signal.entry_price = live_price    # update signal to reflect actual execution price
-        signal.order_type  = OrderType.MARKET
-    else:
+    # Step 1 — Risk approval (includes gold toggle check)
+    # Use primary account for the approval check (symbol, direction, etc.)
+    if not signal.stop_loss or not signal.risk_percent:
         missing = [f for f, v in [
             ("risk %",    signal.risk_percent),
             ("stop loss", signal.stop_loss),
@@ -141,33 +115,84 @@ async def handle_open(
         logger.warning(f"Missing {', '.join(missing)} — using default lot: {settings.default_lot_size}")
         signal.lot_size = settings.default_lot_size
 
-    # Step 2 — Risk approval (includes gold toggle check)
     approved, reason = risk.approve(signal)
     if not approved:
         logger.warning(f"Signal BLOCKED: {reason}")
         return
 
-    # Step 3 — Execute
-    result = executor.execute(signal)
-    if result["success"] and signal.source_message_id:
-        tracker.record_open(
-            telegram_message_id=signal.source_message_id,
-            mt5_ticket=result["ticket"],
-            symbol=signal.symbol,
-            direction=signal.direction.value,
-            lot=result["lot"],
-            entry_price=result["price"],
-        )
-        logger.info(f"Trade OPENED: {result}")
-    elif not result["success"]:
-        logger.error(f"Trade FAILED: {result.get('error')}")
+    # Step 2 — Execute on all accounts (each calculates its own lot size)
+    if signal.stop_loss and signal.risk_percent:
+        results = await executor.execute_all(signal, signal.risk_percent)
+    else:
+        # No risk % or SL — use default lot, execute directly
+        signal.order_type = OrderType.MARKET
+        results = []
+        for ex in executor._active():
+            live_price = ex.get_live_price(signal.symbol, signal.direction.value)
+            if live_price:
+                signal.entry_price = live_price
+            result = ex.execute(signal)
+            results.append({"label": ex.label, **result})
+
+    # Step 3 — Record successful trades in tracker
+    for result in results:
+        if result.get("success") and signal.source_message_id:
+            tracker.record_open(
+                telegram_message_id=signal.source_message_id,
+                mt5_ticket=result["ticket"],
+                symbol=result.get("symbol", signal.symbol),
+                direction=signal.direction.value,
+                lot=result.get("lot", signal.lot_size),
+                entry_price=result.get("price", 0),
+            )
+            logger.info(f"[{result.get('label', '?')}] Trade OPENED: ticket={result.get('ticket')} "
+                       f"{signal.direction.value} {result.get('lot')} @ {result.get('price')}")
+        elif not result.get("success"):
+            logger.error(f"[{result.get('label', '?')}] Trade FAILED: {result.get('error')}")
+
+
+# ── Telegram message fetch helper ────────────────────────────────────────────────
+
+async def _fetch_symbol_from_tg_message(close_signal, message_id: int):
+    """
+    Fetch a specific Telegram message by ID and try to parse a symbol from it.
+    Uses the client reference attached to close_signal by TelegramListener.
+    Returns symbol string or None.
+    """
+    client   = getattr(close_signal, "_tg_client",   None)
+    group_id = getattr(close_signal, "_tg_group_id", None)
+
+    if not client or not group_id:
+        logger.debug("No Telegram client context available for message fetch")
+        return None
+
+    try:
+        messages = await client.get_messages(group_id, ids=message_id)
+        if not messages:
+            return None
+        msg = messages if not isinstance(messages, list) else messages[0]
+        if not msg or not msg.text:
+            return None
+
+        from core.signal_parser import SignalParser
+        sp = SignalParser()
+        symbol = sp._extract_symbol(msg.text)
+        if symbol:
+            logger.info(
+                f"Symbol '{symbol}' extracted from Telegram message [{message_id}]: "
+                f"{msg.text[:60]}..."
+            )
+        return symbol
+    except Exception as e:
+        logger.warning(f"Failed to fetch Telegram message [{message_id}]: {e}")
+        return None
 
 
 # ── Close position pipeline ───────────────────────────────────────────────────
 
 async def handle_close(
     close_signal: CloseSignal,
-    executor: MT5Executor,
+    executor: MultiAccountExecutor,
     tracker: PositionTracker,
 ):
     from ui.dashboard import push_error
@@ -229,11 +254,55 @@ async def handle_close(
 
         # No reply context → close all positions for the named symbol
         symbol = close_signal.symbol
+
+        # ── Level 1: symbol explicitly in close message ───────────────────────
+        # (already in close_signal.symbol — nothing to do)
+
+        # ── Level 2: fetch replied-to message from Telegram and parse it ──────
+        if not symbol and close_signal.reply_to_message_id:
+            # First try the tracker (instant, no network)
+            record = tracker.get_record(close_signal.reply_to_message_id)
+            if record:
+                symbol = record.get("symbol")
+                logger.info(f"Symbol resolved from tracker reply: {symbol}")
+            else:
+                # Tracker doesn't have it — fetch the actual Telegram message
+                symbol = await _fetch_symbol_from_tg_message(
+                    close_signal,
+                    close_signal.reply_to_message_id,
+                )
+
+        # ── Level 3: fetch the previous Telegram message and parse it ─────────
+        if not symbol:
+            tg_msg_id = getattr(close_signal, "_tg_message_id", None)
+            if tg_msg_id:
+                symbol = await _fetch_symbol_from_tg_message(
+                    close_signal,
+                    tg_msg_id - 1,
+                )
+                if symbol:
+                    logger.info(f"Symbol resolved from previous Telegram message: {symbol}")
+
+        # ── Level 4: ask MT5 for the most recently opened position ────────────
+        if not symbol:
+            positions = executor.get_open_positions()
+            if positions:
+                # MT5 returns positions; sort by ticket descending (highest = most recent)
+                latest = sorted(positions, key=lambda p: p["ticket"], reverse=True)[0]
+                symbol = latest["symbol"]
+                # Strip broker suffix for consistency (e.g. GBPUSD.bp → GBPUSD)
+                if "." in symbol:
+                    symbol = symbol.split(".")[0]
+                logger.warning(
+                    f"MT5 fallback: closing most recently opened position "
+                    f"{latest['type']} {symbol} ticket={latest['ticket']} "
+                    f"(could not determine symbol from message context)"
+                )
+
         if not symbol:
             msg = (
                 "Close signal received but could not determine the symbol. "
-                "Include the symbol in the message (e.g. 'Close XAUUSD') "
-                "or send it as a reply to the original open signal."
+                "No open positions found in tracker or MT5 to fall back to."
             )
             logger.error(msg)
             push_error(msg)
@@ -290,7 +359,7 @@ async def handle_close(
 
 async def handle_move_sl(
     move_signal: MoveSLSignal,
-    executor: MT5Executor,
+    executor: MultiAccountExecutor,
     tracker: PositionTracker,
 ):
     from ui.dashboard import push_error

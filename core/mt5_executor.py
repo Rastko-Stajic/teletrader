@@ -20,9 +20,11 @@ except ImportError:
 
 
 class MT5Executor:
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self.connected = False
+    def __init__(self, settings: Settings, label: str = "Account 1", terminal_path: str = ""):
+        self.settings       = settings
+        self.label          = label
+        self.terminal_path  = terminal_path   # path to terminal64.exe, empty = auto-detect
+        self.connected      = False
 
     def connect(self) -> bool:
         if not MT5_AVAILABLE:
@@ -30,11 +32,16 @@ class MT5Executor:
             self.connected = True
             return True
 
-        initialized = mt5.initialize(
-            login=self.settings.mt5_login,
-            password=self.settings.mt5_password,
-            server=self.settings.mt5_server,
-        )
+        init_kwargs = {
+            "login":    self.settings.mt5_login,
+            "password": self.settings.mt5_password,
+            "server":   self.settings.mt5_server,
+        }
+        if self.terminal_path:
+            init_kwargs["path"] = self.terminal_path
+            logger.info(f"[{self.label}] Using terminal: {self.terminal_path}")
+
+        initialized = mt5.initialize(**init_kwargs)
 
         if not initialized:
             error = mt5.last_error()
@@ -87,6 +94,11 @@ class MT5Executor:
                 action_type = mt5.ORDER_TYPE_SELL
                 price = tick.bid
         else:
+            # Pending order: pick LIMIT vs STOP based on entry price vs current market.
+            # BUY_LIMIT  requires entry < ask  (buy cheaper than market)
+            # BUY_STOP   requires entry > ask  (buy on breakout above market)
+            # SELL_LIMIT requires entry > bid  (sell higher than market)
+            # SELL_STOP  requires entry < bid  (sell on breakdown below market)
             price = signal.entry_price
             if signal.direction == Direction.BUY:
                 action_type = mt5.ORDER_TYPE_BUY_LIMIT if price < tick.ask else mt5.ORDER_TYPE_BUY_STOP
@@ -96,7 +108,8 @@ class MT5Executor:
         # Normalize price to symbol's required decimal precision
         price = round(price, symbol_info.digits)
 
-        # Resolve the filling mode the broker actually supports for this symbol
+        # Resolve the filling mode the broker actually supports for this symbol.
+        # filling_mode is a bitmask: 1 = FOK, 2 = IOC, 4 = RETURN
         filling_mode = symbol_info.filling_mode
         if filling_mode & 1:
             type_filling = mt5.ORDER_FILLING_FOK
@@ -111,8 +124,8 @@ class MT5Executor:
             "volume": lot,
             "type": action_type,
             "price": price,
-            "deviation": 20,
-            "magic": 20240101,
+            "deviation": 20,  # max slippage in points
+            "magic": 20240101,  # unique identifier for this bot's trades
             "comment": f"TeleTrader #{signal.source_message_id}",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": type_filling,
@@ -122,7 +135,7 @@ class MT5Executor:
             request["sl"] = signal.stop_loss
 
         if signal.take_profits:
-            request["tp"] = signal.take_profits[0]
+            request["tp"] = signal.take_profits[0]  # MT5 supports single TP per order
 
         result = mt5.order_send(request)
 
@@ -136,6 +149,7 @@ class MT5Executor:
             f"{lot} {signal.symbol} @ {price}"
         )
 
+        # If multiple TPs, place additional partial orders
         if len(signal.take_profits) > 1:
             self._place_additional_tps(signal, lot, price, action_type)
 
@@ -206,7 +220,6 @@ class MT5Executor:
                 "profit": p.profit,
                 "sl": p.sl,
                 "tp": p.tp,
-                "time": p.time,
             }
             for p in positions
         ]
@@ -229,6 +242,11 @@ class MT5Executor:
     # ── Close / Cancel methods ────────────────────────────────────────────────
 
     def close_position(self, ticket: int) -> Dict[str, Any]:
+        """
+        Market-close a single open position by MT5 ticket number.
+        Returns {"success": True, "ticket": ..., "price": ..., "profit": ...}
+        or      {"success": False, "error": ...}
+        """
         if not MT5_AVAILABLE:
             logger.info(f"[SIMULATION] Would close ticket={ticket}")
             return {"success": True, "simulated": True, "ticket": ticket, "price": 0, "profit": 0}
@@ -239,19 +257,10 @@ class MT5Executor:
             logger.error(msg)
             return {"success": False, "error": msg}
 
+        # Closing direction is opposite to opening direction
         close_type = mt5.ORDER_TYPE_SELL if position.type == 0 else mt5.ORDER_TYPE_BUY
         tick = mt5.symbol_info_tick(position.symbol)
-        price = tick.bid if position.type == 0 else tick.ask
-
-        # Resolve filling mode for this symbol
-        symbol_info = mt5.symbol_info(position.symbol)
-        filling_mode = symbol_info.filling_mode if symbol_info else 2
-        if filling_mode & 1:
-            type_filling = mt5.ORDER_FILLING_FOK
-        elif filling_mode & 2:
-            type_filling = mt5.ORDER_FILLING_IOC
-        else:
-            type_filling = mt5.ORDER_FILLING_RETURN
+        price = tick.bid if position.type == 0 else tick.ask  # BUY closes at bid, SELL at ask
 
         request = {
             "action":   mt5.TRADE_ACTION_DEAL,
@@ -264,7 +273,7 @@ class MT5Executor:
             "magic":    20240101,
             "comment":  f"TeleTrader close #{ticket}",
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": type_filling,
+            "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
         result = mt5.order_send(request)
@@ -286,6 +295,10 @@ class MT5Executor:
         }
 
     def close_all_positions(self) -> Dict[str, Any]:
+        """
+        Market-close every open position on the account.
+        Returns a summary dict with per-ticket results.
+        """
         if not MT5_AVAILABLE:
             logger.info("[SIMULATION] Would close all positions")
             return {"success": True, "simulated": True, "closed": [], "failed": []}
@@ -307,6 +320,9 @@ class MT5Executor:
         return {"success": len(failed) == 0, "closed": closed, "failed": failed}
 
     def cancel_pending_order(self, ticket: int) -> Dict[str, Any]:
+        """
+        Delete a pending (limit/stop) order by ticket.
+        """
         if not MT5_AVAILABLE:
             logger.info(f"[SIMULATION] Would cancel pending order ticket={ticket}")
             return {"success": True, "simulated": True, "ticket": ticket}
@@ -326,6 +342,11 @@ class MT5Executor:
         return {"success": True, "ticket": ticket}
 
     def close_positions_by_symbol_and_direction(self, symbol: str, direction: str) -> dict:
+        """
+        Market-close all open positions for a specific symbol AND direction.
+        direction: "BUY" or "SELL"
+        Returns {"success": True, "closed": [...], "failed": [...]}
+        """
         if not MT5_AVAILABLE:
             logger.info(f"[SIMULATION] Would close all {direction} {symbol} positions")
             return {"success": True, "simulated": True, "closed": [], "failed": []}
@@ -336,6 +357,7 @@ class MT5Executor:
             logger.warning(msg)
             return {"success": False, "error": msg, "closed": [], "failed": []}
 
+        # MT5 position type: 0 = BUY, 1 = SELL
         target_type = 0 if direction.upper() == "BUY" else 1
         matching = [p for p in positions if p.type == target_type]
 
@@ -356,6 +378,10 @@ class MT5Executor:
         return {"success": len(failed) == 0, "closed": closed, "failed": failed}
 
     def close_positions_by_symbol(self, symbol: str) -> dict:
+        """
+        Market-close all open positions for a specific symbol.
+        Returns {"success": True, "closed": [...], "failed": [...]}
+        """
         if not MT5_AVAILABLE:
             logger.info(f"[SIMULATION] Would close all {symbol} positions")
             return {"success": True, "simulated": True, "closed": [], "failed": []}
@@ -376,7 +402,7 @@ class MT5Executor:
 
         logger.info(f"close_by_symbol {symbol}: {len(closed)} closed, {len(failed)} failed")
         return {"success": len(failed) == 0, "closed": closed, "failed": failed}
-
+    
     def _to_mt5_symbol(self, symbol: str) -> str:
         """Append broker suffix if not already present."""
         suffix = self.settings.mt5_symbol_suffix
@@ -389,35 +415,14 @@ class MT5Executor:
     def get_live_price(self, symbol: str, direction: str) -> Optional[float]:
         """
         Returns live ask price for BUY, bid price for SELL.
-        Ensures the symbol is in Market Watch before fetching.
+        Uses the MT5 symbol with broker suffix applied.
         Returns None if price unavailable.
         """
         if not MT5_AVAILABLE:
             logger.warning(f"[SIMULATION] Cannot get live price for {symbol}")
             return None
 
-        import time
         mt5_symbol = self._to_mt5_symbol(symbol)
-
-        # Check symbol exists
-        info = mt5.symbol_info(mt5_symbol)
-        if info is None:
-            logger.error(f"Symbol {mt5_symbol} not found in MT5.")
-            # Log similar symbols to help diagnose naming issues
-            all_symbols = mt5.symbols_get()
-            if all_symbols:
-                base = symbol[:3].upper()
-                similar = [s.name for s in all_symbols if base in s.name][:10]
-                if similar:
-                    logger.info(f"Similar symbols containing '{base}': {similar}")
-            return None
-
-        # Add to Market Watch if not visible and wait for price feed
-        if not info.visible:
-            logger.info(f"{mt5_symbol} not in Market Watch — adding it")
-            mt5.symbol_select(mt5_symbol, True)
-            time.sleep(0.5)
-
         tick = mt5.symbol_info_tick(mt5_symbol)
         if tick is None:
             logger.error(f"Cannot get tick data for {mt5_symbol}")
@@ -430,8 +435,15 @@ class MT5Executor:
     def modify_sl_by_symbol_and_direction(
         self, symbol: str, direction: str, new_sl: float
     ) -> dict:
+        """
+        Modify the stop loss on all open positions matching symbol + direction.
+        direction: "BUY" or "SELL"
+        Returns {"success": True, "modified": [tickets], "failed": [...]}
+        """
         if not MT5_AVAILABLE:
-            logger.info(f"[SIMULATION] Would move SL for {direction} {symbol} → {new_sl}")
+            logger.info(
+                f"[SIMULATION] Would move SL for {direction} {symbol} → {new_sl}"
+            )
             return {"success": True, "simulated": True, "modified": [], "failed": []}
 
         mt5_symbol = self._to_mt5_symbol(symbol)

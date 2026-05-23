@@ -30,8 +30,13 @@ class Settings:
     max_open_trades: int = field(default_factory=lambda: int(os.getenv("MAX_OPEN_TRADES", "5")))
     max_daily_loss_usd: float = field(default_factory=lambda: float(os.getenv("MAX_DAILY_LOSS_USD", "100")))
     kill_switch: bool = False            # toggled at runtime via dashboard
-    gold_enabled: bool = True           # Gold (XAUUSD) trading — disabled by default
+    gold_enabled: bool = False           # Gold (XAUUSD) trading — disabled by default
     force_market_execution: bool = field(default_factory=lambda: os.getenv("FORCE_MARKET_EXECUTION", "true").lower() == "true")
+
+    # --- Additional MT5 accounts ---
+    # Format: "login:password:server,login2:password2:server2"
+    # Primary account is always MT5_LOGIN/MT5_PASSWORD/MT5_SERVER above
+    mt5_extra_accounts: str = field(default_factory=lambda: os.getenv("MT5_EXTRA_ACCOUNTS", ""))
 
     # --- Dashboard ---
     dashboard_host: str = field(default_factory=lambda: os.getenv("DASHBOARD_HOST", "127.0.0.1"))
