@@ -15,7 +15,7 @@ from telethon.tl.types import Message
 from core.signal_parser import SignalParser, CloseSignalParser, MoveSLParser
 from core.signal import Signal
 from core.logger import get_logger
-from config.settings import Settings
+# Settings type is Any — works with both SharedSettings and AccountSettings
 
 logger = get_logger("telegram")
 
@@ -23,7 +23,7 @@ logger = get_logger("telegram")
 class TelegramListener:
     def __init__(
         self,
-        settings: Settings,
+        settings,   # SharedSettings or AccountSettings
         on_signal:       Callable,   # async (Signal) -> None
         on_close:        Callable,   # async (CloseSignal) -> None
         on_move_sl:      Callable,   # async (MoveSLSignal) -> None
